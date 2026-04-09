@@ -16,6 +16,18 @@ const (
 	ExporterImageDescriptorKey   = "containerimage.descriptor"
 	ExporterImageBaseConfigKey   = "containerimage.base.config"
 	ExporterPlatformsKey         = "refs.platforms"
+	// ExporterIntermediateImageDescriptorsKey carries a JSON-encoded
+	// []ocispecs.Descriptor for intermediate build-step images. Only set by the
+	// OCI non-tar (directory) exporter; used by the client to update index.json.
+	ExporterIntermediateImageDescriptorsKey = "containerimage.intermediate.descriptors"
+	// ExporterIntermediateStepIndexKey is an annotation set on each intermediate
+	// build-step image manifest indicating its 0-based step index within the
+	// build (i.e. its position in the ordered sequence of accumulated exec steps).
+	ExporterIntermediateStepIndexKey = "moby.buildkit.intermediate.step"
+	// ExporterIntermediateStepCommandKey is an annotation set on each intermediate
+	// build-step image manifest with the command that produced it (the exec args,
+	// joined with spaces).
+	ExporterIntermediateStepCommandKey = "moby.buildkit.intermediate.command"
 )
 
 // KnownRefMetadataKeys are the subset of exporter keys that can be suffixed by

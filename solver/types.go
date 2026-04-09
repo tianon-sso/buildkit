@@ -12,6 +12,16 @@ import (
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
+const (
+	// KeyIntermediateImageExporter is the job key for the per-step intermediate
+	// image export function (of type worker.IntermediateImageExportFunc). Set via
+	// Job.SetValue; retrieved via JobContext.EachValue in Op.Exec.
+	KeyIntermediateImageExporter = "buildkit.intermediate-image-exporter"
+	// KeyIntermediateImageAccumulator is the job key for the refAccumulator that
+	// collects intermediate image refs during a build for batch export.
+	KeyIntermediateImageAccumulator = "buildkit.intermediate-image-accumulator"
+)
+
 // Vertex is a node in a build graph. It defines an interface for a
 // content-addressable operation and its inputs.
 type Vertex interface {

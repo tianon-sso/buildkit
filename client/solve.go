@@ -54,6 +54,10 @@ type SolveOpt struct {
 	SourcePolicy          *spb.Policy
 	SourcePolicyProvider  session.Attachable
 	Ref                   string
+	// IntermediateImageOutput, when set, receives a Docker-format image tar
+	// stream for each intermediate build step. It is called once per step and
+	// must be set in conjunction with FrontendAttrs["intermediate-images"]="true".
+	IntermediateImageOutput filesync.FileOutputFunc
 }
 
 type ExportEntry struct {
@@ -217,6 +221,10 @@ func (c *Client) solve(ctx context.Context, def *llb.Definition, runGateway runG
 			s.Allow(sessioncontent.NewAttachable(contentStores))
 		}
 
+		if opt.IntermediateImageOutput != nil {
+			syncTargets = append(syncTargets, filesync.WithFSSync(ExporterIntermediateImagesID, opt.IntermediateImageOutput))
+		}
+
 		if len(syncTargets) > 0 {
 			s.Allow(filesync.NewFSSyncTarget(syncTargets...))
 		}
@@ -236,6 +244,32 @@ func (c *Client) solve(ctx context.Context, def *llb.Definition, runGateway runG
 
 	frontendAttrs := maps.Clone(opt.FrontendAttrs)
 	maps.Copy(frontendAttrs, cacheOpt.frontendAttrs)
+	// When the caller has registered a per-step Docker tar output handler,
+	// signal the server to enable Docker streaming alongside ref accumulation —
+	// but only when no OCI tar output is present. OCI tar files are written
+	// sequentially and cannot accept additional manifests mid-build, so
+	// intermediate images for that path are collected and exported in batch at
+	// the end of the build instead.
+	if opt.IntermediateImageOutput != nil {
+		// Only enable per-step streaming when the build output goes to the Docker
+		// daemon. When an OCI export to a file (tar) or directory is present,
+		// intermediate images are written by the exporter in batch at the end of
+		// the build instead: tar files cannot be extended mid-build, and OCI
+		// directories use the content-store path which handles batch export.
+		// The only OCI-type export that still uses the Docker path is the
+		// Docker-via-OCI-importer case, which leaves Output, OutputDir, and
+		// OutputStore all nil.
+		hasOCIDirectOutput := false
+		for _, ex := range opt.Exports {
+			if ex.Type == ExporterOCI && (ex.Output != nil || ex.OutputDir != "" || ex.OutputStore != nil) {
+				hasOCIDirectOutput = true
+				break
+			}
+		}
+		if !hasOCIDirectOutput {
+			frontendAttrs["intermediate-images-stream"] = "true"
+		}
+	}
 
 	const statusInactivityTimeout = 5 * time.Second
 	statusActivity := make(chan struct{}, 1)
@@ -417,6 +451,21 @@ func (c *Client) solve(ctx context.Context, def *llb.Definition, runGateway runG
 			idx := ociindex.NewStoreIndex(storePath)
 			if err := idx.Put(manifestDesc, names...); err != nil {
 				return nil, err
+			}
+		}
+	}
+	if dt := res.ExporterResponse[exptypes.ExporterIntermediateImageDescriptorsKey]; dt != "" {
+		var descs []ocispecs.Descriptor
+		if err := json.Unmarshal([]byte(dt), &descs); err != nil {
+			return nil, err
+		}
+		for _, storePath := range storesToUpdate {
+			idx := ociindex.NewStoreIndex(storePath)
+			for _, iDesc := range descs {
+				// TODO: set annotation to mark iDesc as an intermediate build-step image
+				if err := idx.Put(iDesc); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}

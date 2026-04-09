@@ -23,6 +23,7 @@ import (
 	"github.com/moby/buildkit/solver/llbsolver/mounts"
 	"github.com/moby/buildkit/solver/llbsolver/ops/opsutils"
 	"github.com/moby/buildkit/solver/pb"
+	"github.com/moby/buildkit/util/bklog"
 	"github.com/moby/buildkit/util/cachedigest"
 	"github.com/moby/buildkit/util/progress/logs"
 	utilsystem "github.com/moby/buildkit/util/system"
@@ -515,6 +516,36 @@ func (e *ExecOp) Exec(ctx context.Context, jobCtx solver.JobContext, inputs []so
 		// Prevent the result from being released.
 		p.OutputRefs[i].Ref = nil
 	}
+
+	// TODO: we could also export intermediate images for failing steps (execErr != nil),
+	// which would let users inspect the state immediately before the failure.
+	if execErr == nil {
+		var exportFn worker.IntermediateImageExportFunc
+		if vp, ok := jobCtx.(interface {
+			EachValue(context.Context, string, func(any) error) error
+		}); ok {
+			_ = vp.EachValue(ctx, solver.KeyIntermediateImageExporter, func(v any) error {
+				exportFn, _ = v.(worker.IntermediateImageExportFunc)
+				return nil
+			})
+		}
+		bklog.G(ctx).Debugf("intermediate-images: exec step done hasExportFn=%v results=%d", exportFn != nil, len(results))
+		if exportFn != nil {
+			sg := jobCtx.Session()
+			for _, res := range results {
+				workerRef, ok := res.Sys().(*worker.WorkerRef)
+				if !ok {
+					bklog.G(ctx).Debugf("intermediate-images: result is not a WorkerRef, skipping")
+					continue
+				}
+				bklog.G(ctx).Debugf("intermediate-images: calling export fn for ref=%s", workerRef.ImmutableRef.ID())
+				if err := exportFn(ctx, workerRef.ImmutableRef, sg); err != nil {
+					return nil, errors.Wrapf(err, "failed to export intermediate image")
+				}
+			}
+		}
+	}
+
 	e.rec = rec
 	return results, errors.Wrapf(execErr, "process %q did not complete successfully", strings.Join(e.op.Meta.Args, " "))
 }

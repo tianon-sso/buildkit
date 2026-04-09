@@ -207,7 +207,47 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 		resp[exptypes.ExporterImageNameKey] = strings.Join(names, ",")
 	}
 
+	// Commit intermediate images (accumulated from per-step exec results when
+	// intermediate-images is enabled). Use the same options as the primary image
+	// but without inline cache or names so they appear as unnamed manifests.
+	iOpts := e.opts
+	var intermediateDescs []ocispecs.Descriptor
+	for i, ref := range buildInfo.IntermediateImages {
+		// Annotations shared between the manifest blob and the index descriptor.
+		anns := map[string]string{
+			exptypes.ExporterIntermediateStepIndexKey: strconv.Itoa(i),
+		}
+		if cmd, ok := strings.CutPrefix(ref.GetDescription(), "mount / from exec "); ok {
+			anns[exptypes.ExporterIntermediateStepCommandKey] = cmd
+		}
+
+		// Start from a fresh AnnotationsGroup (to avoid mutating the shared
+		// e.opts.Annotations) and inject anns at the manifest level so they
+		// are embedded in the manifest blob.
+		stepOpts := iOpts
+		stepOpts.Annotations = containerimage.AnnotationsGroup(nil).
+			Merge(iOpts.Annotations).
+			Merge(containerimage.AnnotationsGroup{
+				"": &containerimage.Annotations{Manifest: anns},
+			})
+		iDesc, err := e.opt.ImageWriter.Commit(ctx, &exporter.Source{Ref: ref}, buildInfo.SessionID, nil, &stepOpts)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		// Strip the internal config.digest side-channel and apply the same
+		// annotations to the index descriptor.
+		delete(iDesc.Annotations, exptypes.ExporterConfigDigestKey)
+		if iDesc.Annotations == nil {
+			iDesc.Annotations = make(map[string]string)
+		}
+		maps.Copy(iDesc.Annotations, anns)
+		intermediateDescs = append(intermediateDescs, *iDesc)
+	}
+
 	expOpts := []archiveexporter.ExportOpt{archiveexporter.WithManifest(*desc, names...)}
+	for _, iDesc := range intermediateDescs {
+		expOpts = append(expOpts, archiveexporter.WithManifest(iDesc))
+	}
 	switch e.opt.Variant {
 	case VariantOCI:
 		expOpts = append(expOpts, archiveexporter.WithAllPlatforms(), archiveexporter.WithSkipDockerManifest())
@@ -232,6 +272,7 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 	for _, ref := range src.Refs {
 		refs = append(refs, ref)
 	}
+	refs = append(refs, buildInfo.IntermediateImages...)
 	eg, egCtx := errgroup.WithContext(ctx)
 	mprovider := contentutil.NewMultiProvider(e.opt.ImageWriter.ContentStore())
 	for _, ref := range refs {
@@ -289,6 +330,18 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 		err := contentutil.CopyChain(ctx, store, mprovider, *desc)
 		if err != nil {
 			return nil, nil, nil, err
+		}
+		if len(intermediateDescs) > 0 {
+			for _, iDesc := range intermediateDescs {
+				if err := contentutil.CopyChain(ctx, store, mprovider, iDesc); err != nil {
+					return nil, nil, nil, err
+				}
+			}
+			dt, err := json.Marshal(intermediateDescs)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			resp[exptypes.ExporterIntermediateImageDescriptorsKey] = string(dt)
 		}
 	}
 

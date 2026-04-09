@@ -90,6 +90,21 @@ func (s *state) ResolverCache() ResolverCache {
 	return s
 }
 
+func (s *state) EachValue(ctx context.Context, key string, fn func(any) error) error {
+	s.mu.Lock()
+	jobs := make([]*Job, 0, len(s.jobs))
+	for j := range s.jobs {
+		jobs = append(jobs, j)
+	}
+	s.mu.Unlock()
+	for _, j := range jobs {
+		if err := j.EachValue(ctx, key, fn); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *state) Lock(key any) (values []any, release func(any) error, err error) {
 	var rcs []ResolverCache
 	s.mu.Lock()

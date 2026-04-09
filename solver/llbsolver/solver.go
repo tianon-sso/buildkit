@@ -4,12 +4,15 @@ import (
 	"context"
 	"maps"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/moby/buildkit/cache"
 	"github.com/moby/buildkit/cache/remotecache"
 	"github.com/moby/buildkit/client"
+	"github.com/moby/buildkit/util/bklog"
 	controlgateway "github.com/moby/buildkit/control/gateway"
 	"github.com/moby/buildkit/executor/resources"
 	resourcestypes "github.com/moby/buildkit/executor/resources/types"
@@ -217,6 +220,23 @@ func (s *Solver) Solve(ctx context.Context, id string, sessionID string, req fro
 		j.SetValue(keySourcePolicySession, policySession)
 	}
 
+	if v, ok := req.FrontendOpt["intermediate-images"]; ok {
+		if enabled, _ := strconv.ParseBool(v); enabled {
+			acc := &refAccumulator{}
+			releasers = append(releasers, func() {
+				acc.release(context.WithoutCancel(ctx))
+			})
+			// intermediate-images-stream=true means the client has registered a
+			// per-step Docker tar handler and expects streaming Docker loads during
+			// the build. Without it, refs are only accumulated for batch export via
+			// ExportBuildInfo.IntermediateImages.
+			stream := req.FrontendOpt["intermediate-images-stream"] == "true"
+			bklog.G(ctx).Debugf("intermediate-images enabled: stream=%v sessionID=%s", stream, sessionID)
+			j.SetValue(solver.KeyIntermediateImageAccumulator, acc)
+			j.SetValue(solver.KeyIntermediateImageExporter, s.makeIntermediateExporter(sessionID, acc, stream))
+		}
+	}
+
 	j.SessionID = sessionID
 
 	br := s.bridge(j)
@@ -400,6 +420,70 @@ func (s *Solver) Solve(ctx context.Context, id string, sessionID string, req fro
 	return &client.SolveResponse{
 		ExporterResponse: exporterResponse,
 	}, nil
+}
+
+// refAccumulator collects cloned ImmutableRefs from per-step exec results so
+// they can be passed to exporters as a batch via ExportBuildInfo.IntermediateImages.
+type refAccumulator struct {
+	mu   sync.Mutex
+	refs []cache.ImmutableRef
+}
+
+func (a *refAccumulator) add(ref cache.ImmutableRef) {
+	a.mu.Lock()
+	a.refs = append(a.refs, ref)
+	a.mu.Unlock()
+}
+
+func (a *refAccumulator) list() []cache.ImmutableRef {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]cache.ImmutableRef, len(a.refs))
+	copy(out, a.refs)
+	return out
+}
+
+func (a *refAccumulator) release(ctx context.Context) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, ref := range a.refs {
+		ref.Release(ctx)
+	}
+	a.refs = nil
+}
+
+func (s *Solver) makeIntermediateExporter(sessionID string, acc *refAccumulator, stream bool) worker.IntermediateImageExportFunc {
+	return func(ctx context.Context, ref cache.ImmutableRef, sg session.Group) error {
+		bklog.G(ctx).Debugf("intermediate-images: export func called ref=%s stream=%v", ref.ID(), stream)
+		acc.add(ref.Clone())
+		if !stream {
+			return nil
+		}
+		w, err := s.resolveWorker()
+		if err != nil {
+			return err
+		}
+		exp, err := w.Exporter(client.ExporterDocker, s.sm)
+		if err != nil {
+			return err
+		}
+		expi, err := exp.Resolve(ctx, client.ExporterIntermediateImagesID, map[string]string{})
+		if err != nil {
+			return err
+		}
+		src := &exporter.Source{Ref: ref}
+		bi := exporter.ExportBuildInfo{SessionID: sessionID}
+		bklog.G(ctx).Debugf("intermediate-images: calling Docker export for ref=%s sessionID=%s", ref.ID(), sessionID)
+		_, finalize, descref, err := expi.Export(ctx, src, bi)
+		if descref != nil {
+			descref.Release()
+		}
+		if err == nil && finalize != nil {
+			err = finalize(ctx)
+		}
+		bklog.G(ctx).Debugf("intermediate-images: Docker export done err=%v", err)
+		return err
+	}
 }
 
 func (s *Solver) leaseManager() (*leaseutil.Manager, error) {

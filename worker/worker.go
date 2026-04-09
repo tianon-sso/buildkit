@@ -19,6 +19,11 @@ import (
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
+// IntermediateImageExportFunc is called after each successful exec step to
+// export the step's output as an intermediate image. Errors are propagated back
+// to the build.
+type IntermediateImageExportFunc func(ctx context.Context, ref cache.ImmutableRef, sg session.Group) error
+
 type Worker interface {
 	io.Closer
 	// ID needs to be unique in the cluster

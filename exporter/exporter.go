@@ -53,6 +53,11 @@ type ExportBuildInfo struct {
 	Ref         string
 	InlineCache exptypes.InlineCache
 	SessionID   string
+	// IntermediateImages holds refs accumulated from per-step exec results when
+	// intermediate-images is enabled. Exporters that support embedding
+	// intermediate images in their output (OCI tar, OCI directory) should commit
+	// and include each ref alongside the primary image.
+	IntermediateImages []cache.ImmutableRef
 }
 
 type DescriptorReference interface {

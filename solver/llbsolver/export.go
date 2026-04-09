@@ -19,6 +19,7 @@ import (
 	"github.com/moby/buildkit/solver"
 	"github.com/moby/buildkit/solver/result"
 	"github.com/moby/buildkit/util/compression"
+	"github.com/moby/buildkit/util/bklog"
 	"github.com/moby/buildkit/util/grpcerrors"
 	"github.com/moby/buildkit/util/progress"
 	"github.com/moby/buildkit/util/tracing"
@@ -189,10 +190,19 @@ func (s *Solver) runExporters(ctx context.Context, ref string, exporters []expor
 					return runInlineCacheExporter(ctx, exp, inlineCacheExporter, job, cached)
 				})
 
+				var intermediateImages []cache.ImmutableRef
+				_ = job.EachValue(ctx, solver.KeyIntermediateImageAccumulator, func(v any) error {
+					if acc, ok := v.(*refAccumulator); ok {
+						intermediateImages = acc.list()
+					}
+					return nil
+				})
+				bklog.G(ctx).Debugf("intermediate-images: passing %d accumulated refs to exporter %s", len(intermediateImages), exp.Name())
 				resp, finalize, desc, expErr := exp.Export(ctx, inp, exporter.ExportBuildInfo{
-					Ref:         ref,
-					SessionID:   job.SessionID,
-					InlineCache: inlineCache,
+					Ref:                ref,
+					SessionID:          job.SessionID,
+					InlineCache:        inlineCache,
+					IntermediateImages: intermediateImages,
 				})
 				resps[i], finalizeFuncs[i], descs[i] = resp, finalize, desc
 				if expErr != nil {
