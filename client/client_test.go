@@ -267,6 +267,7 @@ var allTests = []func(t *testing.T, sb integration.Sandbox){
 	testSourcePolicySessionConvert,
 	testListenBuildHistoryExcludesSoftDeletedRecords,
 	testIntermediateImages,
+	testIntermediateImagesOnFailure,
 }
 
 func TestIntegration(t *testing.T) {
@@ -12313,6 +12314,57 @@ func testIntermediateImages(t *testing.T, sb integration.Sandbox) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.Equal(t, 2, len(tars), "expected one intermediate image per RUN step")
+
+	for i, tarData := range tars {
+		m, err := testutil.ReadTarToMap(tarData, false)
+		require.NoError(t, err, "tar %d is not valid", i)
+		require.Contains(t, m, "manifest.json", "tar %d missing manifest.json (expected Docker format)", i)
+	}
+}
+
+func testIntermediateImagesOnFailure(t *testing.T, sb integration.Sandbox) {
+	requiresLinux(t)
+	workers.CheckFeatureCompat(t, sb, workers.FeatureOCIExporter)
+
+	c, err := New(sb.Context(), sb.Address())
+	require.NoError(t, err)
+	defer c.Close()
+
+	// step1 succeeds, step2 fails. Both should produce intermediate images.
+	st := llb.Image("busybox:latest").
+		Run(llb.Shlex("touch /step1")).Root().
+		Run(llb.Shlex("false")).Root()
+
+	def, err := st.Marshal(sb.Context())
+	require.NoError(t, err)
+
+	var mu sync.Mutex
+	var tars [][]byte
+
+	_, err = c.Solve(sb.Context(), def, SolveOpt{
+		FrontendAttrs: map[string]string{
+			"intermediate-images": "true",
+		},
+		IntermediateImageOutput: func(_ map[string]string) (io.WriteCloser, error) {
+			pr, pw := io.Pipe()
+			go func() {
+				defer pr.Close()
+				data, readErr := io.ReadAll(pr)
+				if readErr != nil {
+					return
+				}
+				mu.Lock()
+				tars = append(tars, data)
+				mu.Unlock()
+			}()
+			return pw, nil
+		},
+	}, nil)
+	require.Error(t, err, "expected build to fail")
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 2, len(tars), "expected one intermediate image per RUN step, including the failing one")
 
 	for i, tarData := range tars {
 		m, err := testutil.ReadTarToMap(tarData, false)

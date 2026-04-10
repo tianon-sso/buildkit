@@ -517,31 +517,36 @@ func (e *ExecOp) Exec(ctx context.Context, jobCtx solver.JobContext, inputs []so
 		p.OutputRefs[i].Ref = nil
 	}
 
-	// TODO: we could also export intermediate images for failing steps (execErr != nil),
-	// which would let users inspect the state immediately before the failure.
-	if execErr == nil {
-		var exportFn worker.IntermediateImageExportFunc
-		if vp, ok := jobCtx.(interface {
-			EachValue(context.Context, string, func(any) error) error
-		}); ok {
-			_ = vp.EachValue(ctx, solver.KeyIntermediateImageExporter, func(v any) error {
-				exportFn, _ = v.(worker.IntermediateImageExportFunc)
-				return nil
-			})
-		}
-		bklog.G(ctx).Debugf("intermediate-images: exec step done hasExportFn=%v results=%d", exportFn != nil, len(results))
-		if exportFn != nil {
-			sg := jobCtx.Session()
-			for _, res := range results {
-				workerRef, ok := res.Sys().(*worker.WorkerRef)
-				if !ok {
-					bklog.G(ctx).Debugf("intermediate-images: result is not a WorkerRef, skipping")
-					continue
+	// Export intermediate images for each exec step. When execErr != nil,
+	// exporting the committed output gives users the filesystem state at the
+	// time the command failed, which is the most valuable case for debugging.
+	// Note: this only benefits streaming mode — on failure the build never
+	// reaches runExporters, so the batch/OCI accumulator path is a no-op.
+	var exportFn worker.IntermediateImageExportFunc
+	if vp, ok := jobCtx.(interface {
+		EachValue(context.Context, string, func(any) error) error
+	}); ok {
+		_ = vp.EachValue(ctx, solver.KeyIntermediateImageExporter, func(v any) error {
+			exportFn, _ = v.(worker.IntermediateImageExportFunc)
+			return nil
+		})
+	}
+	bklog.G(ctx).Debugf("intermediate-images: exec step done hasExportFn=%v results=%d failed=%v", exportFn != nil, len(results), execErr != nil)
+	if exportFn != nil {
+		sg := jobCtx.Session()
+		for _, res := range results {
+			workerRef, ok := res.Sys().(*worker.WorkerRef)
+			if !ok {
+				bklog.G(ctx).Debugf("intermediate-images: result is not a WorkerRef, skipping")
+				continue
+			}
+			bklog.G(ctx).Debugf("intermediate-images: calling export fn for ref=%s", workerRef.ImmutableRef.ID())
+			if exportErr := exportFn(ctx, workerRef.ImmutableRef, sg); exportErr != nil {
+				if execErr == nil {
+					return nil, errors.Wrapf(exportErr, "failed to export intermediate image")
 				}
-				bklog.G(ctx).Debugf("intermediate-images: calling export fn for ref=%s", workerRef.ImmutableRef.ID())
-				if err := exportFn(ctx, workerRef.ImmutableRef, sg); err != nil {
-					return nil, errors.Wrapf(err, "failed to export intermediate image")
-				}
+				// Don't let an export error mask the original build failure.
+				bklog.G(ctx).Warnf("intermediate-images: failed to export intermediate image for failed step: %v", exportErr)
 			}
 		}
 	}
