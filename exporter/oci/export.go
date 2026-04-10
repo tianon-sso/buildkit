@@ -11,6 +11,7 @@ import (
 	"time"
 
 	archiveexporter "github.com/containerd/containerd/v2/core/images/archive"
+	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/distribution/reference"
 	"github.com/moby/buildkit/cache"
@@ -149,6 +150,16 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 	}
 	opts.Annotations = opts.Annotations.Merge(as)
 
+	// For per-step intermediate exports, embed step annotations in the manifest
+	// blob so they are verifiable from the blob content, not only from the
+	// index descriptor written via store.Update().
+	if buildInfo.IntermediateStepIdx != nil {
+		anns := intermediateStepAnnotations(*buildInfo.IntermediateStepIdx, src.Ref)
+		opts.Annotations = opts.Annotations.Merge(containerimage.AnnotationsGroup{
+			"": &containerimage.Annotations{Manifest: anns},
+		})
+	}
+
 	ctx, done, err := leaseutil.WithLease(ctx, e.opt.LeaseManager, leaseutil.MakeTemporary)
 	if err != nil {
 		return nil, nil, nil, err
@@ -214,12 +225,7 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 	var intermediateDescs []ocispecs.Descriptor
 	for i, ref := range buildInfo.IntermediateImages {
 		// Annotations shared between the manifest blob and the index descriptor.
-		anns := map[string]string{
-			exptypes.ExporterIntermediateStepIndexKey: strconv.Itoa(i),
-		}
-		if cmd, ok := strings.CutPrefix(ref.GetDescription(), "mount / from exec "); ok {
-			anns[exptypes.ExporterIntermediateStepCommandKey] = cmd
-		}
+		anns := intermediateStepAnnotations(i, ref)
 
 		// Start from a fresh AnnotationsGroup (to avoid mutating the shared
 		// e.opts.Annotations) and inject anns at the manifest level so they
@@ -331,6 +337,24 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 		if err != nil {
 			return nil, nil, nil, err
 		}
+		// For per-step intermediate exports (OCI dir + intermediate-images enabled),
+		// signal the client's indexUpdatingStore to update index.json with this
+		// step's descriptor. The annotations carry step index and command so the
+		// client can identify the step without fetching the manifest.
+		if buildInfo.IntermediateStepIdx != nil {
+			anns := intermediateStepAnnotations(*buildInfo.IntermediateStepIdx, src.Ref)
+			stepDesc := *desc
+			if stepDesc.Annotations == nil {
+				stepDesc.Annotations = make(map[string]string)
+			}
+			maps.Copy(stepDesc.Annotations, anns)
+			if descJSON, merr := json.Marshal(stepDesc); merr == nil {
+				_, _ = store.Update(ctx, content.Info{
+					Digest: stepDesc.Digest,
+					Labels: map[string]string{exptypes.LabelIntermediateImageDescriptor: string(descJSON)},
+				}, "labels."+exptypes.LabelIntermediateImageDescriptor)
+			}
+		}
 		if len(intermediateDescs) > 0 {
 			for _, iDesc := range intermediateDescs {
 				if err := contentutil.CopyChain(ctx, store, mprovider, iDesc); err != nil {
@@ -346,6 +370,22 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 	}
 
 	return resp, nil, nil, nil
+}
+
+// intermediateStepAnnotations returns the index and command annotations for an
+// intermediate build-step image. idx is the 0-based accumulation order. The
+// command is extracted from the ref description when it matches the root-mount
+// format produced by ExecOp ("mount / from exec <cmd>").
+func intermediateStepAnnotations(idx int, ref cache.ImmutableRef) map[string]string {
+	anns := map[string]string{
+		exptypes.ExporterIntermediateIndexKey: strconv.Itoa(idx),
+	}
+	if ref != nil {
+		if cmd, ok := strings.CutPrefix(ref.GetDescription(), "mount / from exec "); ok {
+			anns[exptypes.ExporterIntermediateStepCommandKey] = cmd
+		}
+	}
+	return anns
 }
 
 func normalizedNames(name string) ([]string, error) {

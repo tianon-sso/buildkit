@@ -221,19 +221,30 @@ func (s *Solver) Solve(ctx context.Context, id string, sessionID string, req fro
 	}
 
 	if v, ok := req.FrontendOpt["intermediate-images"]; ok {
-		if enabled, _ := strconv.ParseBool(v); enabled {
+		enabled, _ := strconv.ParseBool(v)
+		if enabled || v == "docker-stream" {
 			acc := &refAccumulator{}
 			releasers = append(releasers, func() {
 				acc.release(context.WithoutCancel(ctx))
 			})
-			// intermediate-images-stream=true means the client has registered a
-			// per-step Docker tar handler and expects streaming Docker loads during
-			// the build. Without it, refs are only accumulated for batch export via
-			// ExportBuildInfo.IntermediateImages.
-			stream := req.FrontendOpt["intermediate-images-stream"] == "true"
-			bklog.G(ctx).Debugf("intermediate-images enabled: stream=%v sessionID=%s", stream, sessionID)
+			// intermediate-images=docker-stream: client registered a per-step
+			// Docker tar handler; stream each step via Docker export.
+			// ociPush: derived from exp.Exporters — any OCI exporter with
+			// tar=false uses the session content store for per-step blob push,
+			// signalling index.json updates via store.Update().
+			// Without docker-stream or an OCI dir exporter, refs are only
+			// accumulated for batch export via ExportBuildInfo.IntermediateImages.
+			stream := v == "docker-stream"
+			ociPush := false
+			for _, expi := range exp.Exporters {
+				if expi.Type() == client.ExporterOCI && expi.Attrs()["tar"] == "false" {
+					ociPush = true
+					break
+				}
+			}
+			bklog.G(ctx).Debugf("intermediate-images enabled: stream=%v ociPush=%v sessionID=%s", stream, ociPush, sessionID)
 			j.SetValue(solver.KeyIntermediateImageAccumulator, acc)
-			j.SetValue(solver.KeyIntermediateImageExporter, s.makeIntermediateExporter(sessionID, acc, stream))
+			j.SetValue(solver.KeyIntermediateImageExporter, s.makeIntermediateExporter(sessionID, acc, stream, ociPush))
 		}
 	}
 
@@ -429,10 +440,11 @@ type refAccumulator struct {
 	refs []cache.ImmutableRef
 }
 
-func (a *refAccumulator) add(ref cache.ImmutableRef) {
+func (a *refAccumulator) add(ref cache.ImmutableRef) int {
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	a.refs = append(a.refs, ref)
-	a.mu.Unlock()
+	return len(a.refs) - 1
 }
 
 func (a *refAccumulator) list() []cache.ImmutableRef {
@@ -452,9 +464,41 @@ func (a *refAccumulator) release(ctx context.Context) {
 	a.refs = nil
 }
 
-func (s *Solver) makeIntermediateExporter(sessionID string, acc *refAccumulator, stream bool) worker.IntermediateImageExportFunc {
+func (s *Solver) makeIntermediateExporter(sessionID string, acc *refAccumulator, stream, ociPush bool) worker.IntermediateImageExportFunc {
 	return func(ctx context.Context, ref cache.ImmutableRef, sg session.Group) error {
-		bklog.G(ctx).Debugf("intermediate-images: export func called ref=%s stream=%v", ref.ID(), stream)
+		bklog.G(ctx).Debugf("intermediate-images: export func called ref=%s stream=%v ociPush=%v", ref.ID(), stream, ociPush)
+
+		// In ociPush mode, push each step's image blobs to the client's OCI
+		// directory content store immediately after the step completes, then
+		// signal index.json update via store.Update(). We still add to acc so
+		// the accumulation index is consistent and refs are released on cleanup.
+		if ociPush {
+			idx := acc.add(ref.Clone())
+			w, err := s.resolveWorker()
+			if err != nil {
+				return err
+			}
+			exp, err := w.Exporter(client.ExporterOCI, s.sm)
+			if err != nil {
+				return err
+			}
+			expi, err := exp.Resolve(ctx, client.ExporterIntermediateImagesID, map[string]string{"tar": "false"})
+			if err != nil {
+				return err
+			}
+			bi := exporter.ExportBuildInfo{
+				SessionID:           sessionID,
+				IntermediateStepIdx: &idx,
+			}
+			bklog.G(ctx).Debugf("intermediate-images: OCI per-step export ref=%s idx=%d", ref.ID(), idx)
+			_, _, descref, err := expi.Export(ctx, &exporter.Source{Ref: ref}, bi)
+			if descref != nil {
+				descref.Release()
+			}
+			bklog.G(ctx).Debugf("intermediate-images: OCI per-step export done err=%v", err)
+			return err
+		}
+
 		acc.add(ref.Clone())
 		if !stream {
 			return nil

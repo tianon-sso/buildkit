@@ -20,14 +20,22 @@ const (
 	// []ocispecs.Descriptor for intermediate build-step images. Only set by the
 	// OCI non-tar (directory) exporter; used by the client to update index.json.
 	ExporterIntermediateImageDescriptorsKey = "containerimage.intermediate.descriptors"
-	// ExporterIntermediateStepIndexKey is an annotation set on each intermediate
-	// build-step image manifest indicating its 0-based step index within the
-	// build (i.e. its position in the ordered sequence of accumulated exec steps).
-	ExporterIntermediateStepIndexKey = "moby.buildkit.intermediate.step"
+	// ExporterIntermediateIndexKey is an annotation set on each intermediate
+	// build-step image manifest with its 0-based index in the ordered sequence
+	// of intermediate images accumulated during the build. This is NOT the
+	// BuildKit vertex/step index; it is simply the order in which exec steps
+	// completed and were captured.
+	ExporterIntermediateIndexKey = "moby.buildkit.intermediate.index"
 	// ExporterIntermediateStepCommandKey is an annotation set on each intermediate
 	// build-step image manifest with the command that produced it (the exec args,
 	// joined with spaces).
 	ExporterIntermediateStepCommandKey = "moby.buildkit.intermediate.command"
+	// LabelIntermediateImageDescriptor is a content store label used as a
+	// side-channel to notify the client to update index.json after a per-step
+	// OCI intermediate image blob has been pushed. The value is a JSON-encoded
+	// ocispecs.Descriptor with step annotations. Only used when
+	// intermediate-images is enabled with OCI directory (tar=false) output.
+	LabelIntermediateImageDescriptor = "buildkit.intermediate.image.descriptor"
 )
 
 // KnownRefMetadataKeys are the subset of exporter keys that can be suffixed by

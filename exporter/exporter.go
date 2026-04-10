@@ -58,6 +58,13 @@ type ExportBuildInfo struct {
 	// intermediate images in their output (OCI tar, OCI directory) should commit
 	// and include each ref alongside the primary image.
 	IntermediateImages []cache.ImmutableRef
+	// IntermediateStepIdx, when non-nil, marks this export as a per-step
+	// intermediate push for OCI directory (tar=false) output. The value is
+	// the 0-based accumulation index; the exporter derives step annotations
+	// (index, command) from it and the source ref description, embeds them in
+	// the manifest, and signals the client via store.Update() for incremental
+	// index.json updates during the build.
+	IntermediateStepIdx *int
 }
 
 type DescriptorReference interface {
