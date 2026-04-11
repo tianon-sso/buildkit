@@ -44,6 +44,11 @@ func InitDockerdWorker() {
 			FeatureSecurityMode,
 			FeatureCNINetwork,
 			FeatureCDI,
+			// TODO: detect support dynamically by querying the
+			// org.mobyproject.buildkit.worker.feature.intermediate-images
+			// label via ListWorkers once dockerd ships a buildkitd that
+			// supports this feature.
+			FeatureIntermediateImages,
 		},
 	})
 	integration.Register(&Moby{
@@ -55,6 +60,11 @@ func InitDockerdWorker() {
 			FeatureCNINetwork,
 			FeatureContentCheck,
 			FeatureCDI,
+			// TODO: detect support dynamically by querying the
+			// org.mobyproject.buildkit.worker.feature.intermediate-images
+			// label via ListWorkers once dockerd ships a buildkitd that
+			// supports this feature.
+			FeatureIntermediateImages,
 		},
 	})
 }

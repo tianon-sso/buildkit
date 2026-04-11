@@ -12274,7 +12274,7 @@ var (
 
 func testIntermediateImages(t *testing.T, sb integration.Sandbox) {
 	requiresLinux(t)
-	workers.CheckFeatureCompat(t, sb, workers.FeatureOCIExporter)
+	workers.CheckFeatureCompat(t, sb, workers.FeatureIntermediateImages)
 
 	c, err := New(sb.Context(), sb.Address())
 	require.NoError(t, err)
@@ -12324,7 +12324,7 @@ func testIntermediateImages(t *testing.T, sb integration.Sandbox) {
 
 func testIntermediateImagesOnFailure(t *testing.T, sb integration.Sandbox) {
 	requiresLinux(t)
-	workers.CheckFeatureCompat(t, sb, workers.FeatureOCIExporter)
+	workers.CheckFeatureCompat(t, sb, workers.FeatureIntermediateImages)
 
 	c, err := New(sb.Context(), sb.Address())
 	require.NoError(t, err)
