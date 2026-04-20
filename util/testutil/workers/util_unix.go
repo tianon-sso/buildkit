@@ -79,7 +79,18 @@ func normalizeAddress(address string) string {
 }
 
 func applyDockerdPlatformFlags(flags []string, _ string) []string {
-	flags = append(flags, "--userland-proxy=false")
+	// NOTE: upstream passes "--userland-proxy=false" here, but that triggers a
+	// write to /proc/sys/net/ipv4/conf/docker0/route_localnet (for hairpin NAT)
+	// which fails in restricted containers where /proc/sys is read-only.
+	// Omitting it means Docker uses the userland proxy instead; docker-proxy is
+	// never actually spawned since the tests don't publish container ports.
+	//
+	// We also pass --iptables=false so that parallel dockerd instances don't
+	// conflict on shared iptables chain names (they share a network namespace).
+	// This is safe: the tests don't publish container ports and don't require
+	// outbound NAT. The bridge itself is given a unique name in Moby.New so
+	// that each instance creates its own interface without conflicting.
+	flags = append(flags, "--iptables=false")
 	return flags
 }
 

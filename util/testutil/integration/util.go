@@ -145,7 +145,7 @@ func WaitSocket(address string, d time.Duration, cmd *exec.Cmd) error {
 func LookupBinary(name string) error {
 	_, err := exec.LookPath(name)
 	if err != nil {
-		return errors.Wrapf(ErrRequirements, "failed to lookup %s binary", name)
+		return fmt.Errorf("%w: %s binary not found in PATH", ErrRequirements, name)
 	}
 	return nil
 }

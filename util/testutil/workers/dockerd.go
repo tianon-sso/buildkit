@@ -6,11 +6,13 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/moby/buildkit/cmd/buildkitd/config"
+	"github.com/moby/buildkit/identity"
 	"github.com/moby/buildkit/util/testutil/dockerd"
 	"github.com/moby/buildkit/util/testutil/dockerd/client"
 	"github.com/moby/buildkit/util/testutil/integration"
@@ -170,6 +172,19 @@ func (c Moby) New(ctx context.Context, cfg *integration.BackendConfig) (b integr
 
 	// add platform-specific flags
 	dockerdFlags = applyDockerdPlatformFlags(dockerdFlags, c.ID)
+
+	// Give each daemon instance a unique bridge interface so that parallel
+	// instances don't conflict on docker0 in the shared network namespace.
+	// Docker requires non-default bridge names to be pre-created manually.
+	// Bridge names must be ≤15 chars; "bk"+8 hex chars = 10.
+	bridgeName := "bk" + identity.NewID()[:8]
+	if out, err := exec.Command("ip", "link", "add", bridgeName, "type", "bridge").CombinedOutput(); err != nil {
+		return nil, nil, errors.Wrapf(err, "failed to create bridge %s: %s", bridgeName, out)
+	}
+	deferF.Append(func() error {
+		return exec.Command("ip", "link", "delete", bridgeName).Run()
+	})
+	dockerdFlags = append(dockerdFlags, "--bridge="+bridgeName)
 
 	if s := os.Getenv("BUILDKIT_INTEGRATION_DOCKERD_FLAGS"); s != "" {
 		dockerdFlags = append(dockerdFlags, strings.Split(strings.TrimSpace(s), "\n")...)

@@ -236,7 +236,7 @@ func Run(t *testing.T, testCases []Test, opt ...TestOpt) {
 						ctx, cancel := context.WithCancelCause(ctx)
 						defer func() { cancel(errors.WithStack(context.Canceled)) }()
 
-						sb, closer, err := newSandbox(ctx, t, br, getMirror(), mv)
+						sb, closer, err := newSandbox(ctx, t, br, getMirror(t), mv)
 						require.NoError(t, err)
 						t.Cleanup(func() {
 							if closer != nil {
@@ -303,7 +303,12 @@ func copyImagesLocal(t *testing.T, host string, images map[string]string) error 
 		} else {
 			dockerConfig := config.LoadDefaultConfigFile(os.Stderr)
 
-			desc, provider, err = contentutil.ProviderFromRef(from, contentutil.WithCredentials(
+			pullFrom := from
+			if proxy := os.Getenv("DOCKERHUB_PUBLIC_PROXY_HOST"); proxy != "" {
+				pullFrom = strings.Replace(pullFrom, "docker.io/", proxy+"/", 1)
+			}
+
+			desc, provider, err = contentutil.ProviderFromRef(pullFrom, contentutil.WithCredentials(
 				func(host string) (string, string, error) {
 					ac, err := dockerConfig.GetAuthConfig(host)
 					if err != nil {
@@ -402,17 +407,26 @@ func WriteConfig(updaters []ConfigUpdater) (_ string, _ func() error, err error)
 	return filepath.Join(tmpdir, buildkitdConfigFile), deferF.F(), nil
 }
 
-func lazyMirrorRunnerFunc(t *testing.T, images map[string]string) func() string {
+func lazyMirrorRunnerFunc(t *testing.T, images map[string]string) func(*testing.T) string {
 	var once sync.Once
 	var mirror string
-	return func() string {
+	var setupErr error
+	return func(subtestT *testing.T) string {
 		once.Do(func() {
 			m, err := RunMirror()
-			require.NoError(t, err)
-			require.NoError(t, m.AddImages(t, images))
+			if err != nil {
+				setupErr = err
+				return
+			}
+			if err := m.AddImages(t, images); err != nil {
+				setupErr = err
+				_ = m.Close()
+				return
+			}
 			t.Cleanup(func() { _ = m.Close() })
 			mirror = m.Host
 		})
+		require.NoError(subtestT, setupErr)
 		return mirror
 	}
 }
@@ -472,11 +486,9 @@ func RunMirror() (_ *Mirror, err error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if err != nil {
-			lock.Unlock()
-		}
-	}()
+	if lock != nil {
+		defer lock.Unlock()
+	}
 
 	host, cleanup, err := NewRegistry(mirrorDir)
 	if err != nil {
@@ -491,13 +503,7 @@ func RunMirror() (_ *Mirror, err error) {
 	m.Host = host
 	m.cleanup = cleanup
 
-	if lock != nil {
-		if err := lock.Unlock(); err != nil {
-			return nil, err
-		}
-	}
-
-	return m, err
+	return m, nil
 }
 
 type matrixValue struct {
